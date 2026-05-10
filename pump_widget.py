@@ -2,6 +2,7 @@
 
 import csv
 import os
+import re
 import time
 from PyQt5.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -31,6 +32,21 @@ def _load_syringe_db():
 
 _load_syringe_db()
 
+_global_scale = 1.0
+
+
+def scale_stylesheet(ss: str, scale: float = None) -> str:
+    """Scale all px values in a Qt stylesheet by the given factor."""
+    if scale is None:
+        scale = _global_scale
+    if scale == 1.0:
+        return ss
+    return re.sub(
+        r"(\d+)px",
+        lambda m: f"{max(1, round(int(m.group(1)) * scale))}px",
+        ss,
+    )
+
 
 # ── Numpad dialog ──────────────────────────────────────────────
 
@@ -46,7 +62,7 @@ class NumpadDialog(QDialog):
         self._init_ui()
 
     def _init_ui(self):
-        self.setStyleSheet("""
+        self._numpad_base_style = """
             QDialog { background: #2b2b2b; }
             QPushButton {
                 font-size: 22px; min-width: 64px; min-height: 54px;
@@ -60,7 +76,8 @@ class NumpadDialog(QDialog):
                 border: 2px solid #5294e2; border-radius: 6px;
                 padding: 4px 10px;
             }
-        """)
+        """
+        self.setStyleSheet(scale_stylesheet(self._numpad_base_style))
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -129,9 +146,10 @@ class TouchLineEdit(QLineEdit):
 
     _dialog_open = False
 
-    def __init__(self, text="", allow_negative=False, parent=None):
+    def __init__(self, text="", allow_negative=False, parent=None, on_value_set=None):
         super().__init__(text, parent)
         self._allow_negative = allow_negative
+        self._on_value_set = on_value_set
         self.setReadOnly(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -151,6 +169,8 @@ class TouchLineEdit(QLineEdit):
             )
             if dlg.exec_() == QDialog.Accepted:
                 self.setText(dlg.value())
+                if self._on_value_set:
+                    self._on_value_set()
         finally:
             TouchLineEdit._dialog_open = False
 
@@ -249,7 +269,7 @@ _COMBO_STYLE = """
 
 _PROGRESS_STYLE = """
     QProgressBar { font-size: 13px; min-height: 24px;
-        border: 1px solid #555; border-radius: 4px; background: #1e1e1e; text-align: center; }
+        border: 1px solid #555; border-radius: 4px; background: #5e5e5e; text-align: center; }
     QProgressBar::chunk { background: #4e9a06; border-radius: 3px; }
 """
 
@@ -271,10 +291,13 @@ class PumpWidget(QGroupBox):
         self._run_start_pos = 0.0
         self._current_pos = 0.0
         self._current_status = 0  # 0=idle,1=running,2=paused
+        self._font_scale = 1.0
+        self._style_registry: list[tuple[object, str]] = []  # (widget, base_stylesheet)
         self.setTitle(f"泵 {pump.addr:02d}")
         self.setStyleSheet(_GROUP_STYLE)
         self._init_ui()
         self._set_children_enabled(False)
+        self._record_base_styles()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -314,28 +337,6 @@ class PumpWidget(QGroupBox):
 
         layout.addWidget(self.stack)
 
-        # --- Status & position ---
-        self.status_label = QLabel("状态: --")
-        self.status_label.setStyleSheet(_STATUS_STYLE)
-        layout.addWidget(self.status_label)
-
-        self.position_label = QLabel("位置: -- um")
-        self.position_label.setStyleSheet(_STATUS_STYLE)
-        layout.addWidget(self.position_label)
-
-        # --- Run-mode info (progress + remaining time) ---
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet(_PROGRESS_STYLE)
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
-        self.remain_label = QLabel("")
-        self.remain_label.setStyleSheet(_STATUS_STYLE)
-        self.remain_label.setVisible(False)
-        layout.addWidget(self.remain_label)
-
         layout.addStretch()
 
     # ── Debug page ──
@@ -350,28 +351,21 @@ class PumpWidget(QGroupBox):
         grid.setHorizontalSpacing(4)
         grid.setVerticalSpacing(2)
 
-        def add_row(row, label_text, default, btn_text, handler, allow_neg=False):
+        def add_input(row, label_text, default, allow_neg=False):
             lbl = QLabel(label_text)
             lbl.setStyleSheet(_LABEL_STYLE)
             grid.addWidget(lbl, row, 0)
             inp = TouchLineEdit(default, allow_negative=allow_neg)
             inp.setStyleSheet(_INPUT_STYLE)
-            # inp.setMaximumWidth(100)
-            grid.addWidget(inp, row, 1)
-            btn = QPushButton(btn_text)
-            btn.setStyleSheet(_BTN_SET_STYLE)
-            btn.clicked.connect(handler)
-            grid.addWidget(btn, row, 2)
+            grid.addWidget(inp, row, 1, 1, 2)
             return inp
 
-        self.speed_input = add_row(0, "速度 (um/s):", "1000", "设置", self._set_speed)
-        self.accel_input = add_row(1, "加速度 (1-100):", "80", "设置", self._set_accel)
-        self.incr_input = add_row(2, "增量位移 (um):", "1000", "设置", self._set_increment)
-        self.abs_input = add_row(3, "绝对位置 (um):", "0", "移动", self._set_absolute, allow_neg=True)
+        self.speed_input = add_input(0, "速度 (um/s):", "1000")
+        self.accel_input = add_input(1, "加速度 (1-100):", "80")
+        self.incr_input = add_input(2, "增量位移 (um):", "1000", allow_neg=True)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
         layout.addLayout(grid)
 
         btn_zero = QPushButton("设为零点")
@@ -381,17 +375,35 @@ class PumpWidget(QGroupBox):
 
         ctrl = QHBoxLayout()
         ctrl.setSpacing(4)
-        for text, bg, border, pressed, handler in [
-            ("开始", "#4e9a06", "#3d7d05", "#2d5e04", self._start),
-            ("暂停", "#f57900", "#ce5c00", "#a84b00", self._pause),
-            ("继续", "#3465a4", "#204a87", "#153566", self._resume),
-            ("停止", "#cc0000", "#a40000", "#800000", self._stop),
-        ]:
-            btn = QPushButton(text)
-            btn.setStyleSheet(_BTN_CTRL_STYLE.format(bg=bg, border=border, pressed=pressed))
-            btn.clicked.connect(handler)
-            ctrl.addWidget(btn)
+
+        btn = QPushButton("开始")
+        btn.setStyleSheet(_BTN_CTRL_STYLE.format(
+            bg="#4e9a06", border="#3d7d05", pressed="#2d5e04"))
+        btn.clicked.connect(self._start)
+        ctrl.addWidget(btn)
+
+        self.btn_pause_resume = QPushButton("暂停")
+        self.btn_pause_resume.setStyleSheet(_BTN_CTRL_STYLE.format(
+            bg="#f57900", border="#ce5c00", pressed="#a84b00"))
+        self.btn_pause_resume.clicked.connect(self._toggle_pause)
+        self.btn_pause_resume.setEnabled(False)
+        ctrl.addWidget(self.btn_pause_resume)
+
+        btn = QPushButton("停止")
+        btn.setStyleSheet(_BTN_CTRL_STYLE.format(
+            bg="#cc0000", border="#a40000", pressed="#800000"))
+        btn.clicked.connect(self._stop)
+        ctrl.addWidget(btn)
+
         layout.addLayout(ctrl)
+
+        self.status_label = QLabel("状态: --")
+        self.status_label.setStyleSheet(_STATUS_STYLE)
+        layout.addWidget(self.status_label)
+
+        self.position_label = QLabel("位置: -- um")
+        self.position_label.setStyleSheet(_STATUS_STYLE)
+        layout.addWidget(self.position_label)
 
         return page
 
@@ -453,11 +465,6 @@ class PumpWidget(QGroupBox):
 
         layout.addLayout(grid)
 
-        # Distance info label
-        self.run_dist_label = QLabel("")
-        self.run_dist_label.setStyleSheet(_LABEL_STYLE)
-        layout.addWidget(self.run_dist_label)
-
         # Start / Stop
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
@@ -467,12 +474,40 @@ class PumpWidget(QGroupBox):
         self.btn_run_start.clicked.connect(self._run_start)
         btn_row.addWidget(self.btn_run_start)
 
+        self.btn_run_pause_resume = QPushButton("暂停")
+        self.btn_run_pause_resume.setStyleSheet(_BTN_CTRL_STYLE.format(
+            bg="#f57900", border="#ce5c00", pressed="#a84b00"))
+        self.btn_run_pause_resume.clicked.connect(self._toggle_pause)
+        self.btn_run_pause_resume.setEnabled(False)
+        btn_row.addWidget(self.btn_run_pause_resume)
+
         self.btn_run_stop = QPushButton("停止")
         self.btn_run_stop.setStyleSheet(_BTN_CTRL_STYLE.format(
             bg="#cc0000", border="#a40000", pressed="#800000"))
         self.btn_run_stop.clicked.connect(self._run_stop)
         btn_row.addWidget(self.btn_run_stop)
         layout.addLayout(btn_row)
+
+        self.run_status_label = QLabel("状态: --")
+        self.run_status_label.setStyleSheet(_STATUS_STYLE)
+        layout.addWidget(self.run_status_label)
+
+        self.run_position_label = QLabel("位置: -- um")
+        self.run_position_label.setStyleSheet(_STATUS_STYLE)
+        layout.addWidget(self.run_position_label)
+
+        self.run_progress_bar = QProgressBar()
+        self.run_progress_bar.setRange(0, 100)
+        self.run_progress_bar.setValue(0)
+        self.run_progress_bar.setFormat("已注射 0 mL")
+        self.run_progress_bar.setStyleSheet(_PROGRESS_STYLE)
+        self.run_progress_bar.setVisible(False)
+        layout.addWidget(self.run_progress_bar)
+
+        self.run_remain_label = QLabel("")
+        self.run_remain_label.setStyleSheet(_STATUS_STYLE)
+        self.run_remain_label.setVisible(False)
+        layout.addWidget(self.run_remain_label)
 
         # Trigger initial calculation
         self._on_syringe_changed(self.syringe_combo.currentText())
@@ -485,49 +520,43 @@ class PumpWidget(QGroupBox):
 
     # ── Debug mode commands ──
 
-    def _set_speed(self):
-        try:
-            val = float(self.speed_input.text())
-        except ValueError:
-            self.feedback.emit(f"泵{self.pump.addr}: 速度值无效")
-            return
-        ok = self.pump.set_speed(val)
-        self.feedback.emit(f"泵{self.pump.addr}: 设置速度 {val} um/s {'成功' if ok else '失败'}")
-
-    def _set_accel(self):
-        try:
-            val = int(self.accel_input.text())
-        except ValueError:
-            self.feedback.emit(f"泵{self.pump.addr}: 加速度值无效")
-            return
-        ok = self.pump.set_accel(val)
-        self.feedback.emit(f"泵{self.pump.addr}: 设置加速度 {val} {'成功' if ok else '失败'}")
-
-    def _set_increment(self):
-        try:
-            val = float(self.incr_input.text())
-        except ValueError:
-            self.feedback.emit(f"泵{self.pump.addr}: 位移值无效")
-            return
-        ok = self.pump.set_increment(val)
-        self.feedback.emit(f"泵{self.pump.addr}: 设置增量位移 {val} um {'成功' if ok else '失败'}")
-
-    def _set_absolute(self):
-        try:
-            val = float(self.abs_input.text())
-        except ValueError:
-            self.feedback.emit(f"泵{self.pump.addr}: 位置值无效")
-            return
-        ok = self.pump.set_absolute_position(val)
-        self.feedback.emit(f"泵{self.pump.addr}: 移动到绝对位置 {val} um {'成功' if ok else '失败'}")
-
     def _set_zero(self):
         ok = self.pump.set_current_position_zero()
         self.feedback.emit(f"泵{self.pump.addr}: 设为零点 {'成功' if ok else '失败'}")
 
     def _start(self):
+        addr = self.pump.addr
+        try:
+            speed_val = float(self.speed_input.text())
+        except ValueError:
+            self.feedback.emit(f"泵{addr}: 速度值无效")
+            return
+        try:
+            accel_val = int(self.accel_input.text())
+        except ValueError:
+            self.feedback.emit(f"泵{addr}: 加速度值无效")
+            return
+        try:
+            incr_val = float(self.incr_input.text())
+        except ValueError:
+            self.feedback.emit(f"泵{addr}: 位移值无效")
+            return
+
+        if not self.pump.set_speed(speed_val):
+            self.feedback.emit(f"泵{addr}: 设置速度失败")
+            return
+        if not self.pump.set_accel(accel_val):
+            self.feedback.emit(f"泵{addr}: 设置加速度失败")
+            return
+        if not self.pump.set_increment(incr_val):
+            self.feedback.emit(f"泵{addr}: 设置位移失败")
+            return
+
         ok = self.pump.start()
-        self.feedback.emit(f"泵{self.pump.addr}: 开始 {'成功' if ok else '失败'}")
+        self.feedback.emit(
+            f"泵{addr}: 速度{speed_val}um/s 加速度{accel_val} "
+            f"增量{incr_val}um 开始{'成功' if ok else '失败'}"
+        )
 
     def _pause(self):
         ok = self.pump.pause()
@@ -541,6 +570,12 @@ class PumpWidget(QGroupBox):
         ok = self.pump.stop()
         self.feedback.emit(f"泵{self.pump.addr}: 停止 {'成功' if ok else '失败'}")
 
+    def _toggle_pause(self):
+        if self._current_status == 1:
+            self._pause()
+        elif self._current_status == 2:
+            self._resume()
+
     # ── Mode switch ──
 
     def _switch_mode(self, run: bool):
@@ -548,8 +583,8 @@ class PumpWidget(QGroupBox):
         self.btn_debug.setChecked(not run)
         self.btn_run.setChecked(run)
         self.stack.setCurrentIndex(1 if run else 0)
-        self.progress_bar.setVisible(run)
-        self.remain_label.setVisible(run)
+        self.run_progress_bar.setVisible(run)
+        self.run_remain_label.setVisible(run)
 
     # ── Syringe changed ──
 
@@ -640,10 +675,12 @@ class PumpWidget(QGroupBox):
             return
 
         self._run_total_um = inject_um
+        self._run_total_ml = inject_ml
         self._run_speed_um_s = speed_um_s
         self._run_start_pos = self._current_pos
-        self.progress_bar.setValue(0)
-        self.remain_label.setText("剩余: 计算中...")
+        self.run_progress_bar.setValue(0)
+        self.run_progress_bar.setFormat("已注射 0 mL")
+        self.run_remain_label.setText("剩余: 计算中...")
 
         ok = self.pump.start()
         self.feedback.emit(
@@ -653,6 +690,10 @@ class PumpWidget(QGroupBox):
 
     def _run_stop(self):
         ok = self.pump.stop()
+        self._run_total_um = 0
+        self.run_progress_bar.setValue(0)
+        self.run_progress_bar.setFormat("已注射 0 mL")
+        self.run_remain_label.setText("")
         self.feedback.emit(f"泵{self.pump.addr}: 停止 {'成功' if ok else '失败'}")
 
     # ── Enable / disable ──
@@ -661,11 +702,22 @@ class PumpWidget(QGroupBox):
         self._enabled = checked
         self._set_children_enabled(checked)
         if not checked:
-            self.status_label.setText("状态: --")
-            self.status_label.setStyleSheet(_STATUS_STYLE)
-            self.position_label.setText("位置: -- um")
-            self.progress_bar.setValue(0)
-            self.remain_label.setText("")
+            for label in (self.status_label, self.run_status_label):
+                label.setText("状态: --")
+                label.setStyleSheet(scale_stylesheet(_STATUS_STYLE, self._font_scale))
+                for i, (w, _) in enumerate(self._style_registry):
+                    if w is label:
+                        self._style_registry[i] = (w, _STATUS_STYLE)
+                        break
+            for label in (self.position_label, self.run_position_label):
+                label.setText("位置: -- um")
+            self.run_progress_bar.setValue(0)
+            self.run_progress_bar.setFormat("已注射 0 mL")
+            self.run_remain_label.setText("")
+            for btn in (self.btn_pause_resume, self.btn_run_pause_resume):
+                btn.setText("暂停")
+                btn.setStyleSheet(scale_stylesheet(_BTN_CTRL_STYLE.format(
+                    bg="#f57900", border="#ce5c00", pressed="#a84b00"), self._font_scale))
 
     def _set_children_enabled(self, enabled: bool):
         for btn in self.findChildren(QPushButton):
@@ -676,6 +728,31 @@ class PumpWidget(QGroupBox):
             inp.setEnabled(enabled)
         self.syringe_combo.setEnabled(enabled)
 
+    # ── Font scaling ──
+
+    def _record_base_styles(self):
+        """Walk the widget tree and record all set stylesheets as base (scale=1.0)."""
+        self._style_registry.clear()
+        for child in self.findChildren(QWidget):
+            ss = child.styleSheet()
+            if ss:
+                self._style_registry.append((child, ss))
+        ss = self.styleSheet()
+        if ss:
+            self._style_registry.append((self, ss))
+
+    def set_font_scale(self, scale: float):
+        if abs(scale - self._font_scale) < 0.01:
+            return
+        self._font_scale = scale
+        global _global_scale
+        _global_scale = scale
+        self._apply_scale()
+
+    def _apply_scale(self):
+        for widget, base in self._style_registry:
+            widget.setStyleSheet(scale_stylesheet(base, self._font_scale))
+
     # ── Polling callbacks ──
 
     def update_status(self, addr: int, status: int):
@@ -684,21 +761,48 @@ class PumpWidget(QGroupBox):
         self._current_status = status
         status_map = {0: "空闲", 1: "运行中", 2: "暂停中"}
         text = status_map.get(status, f"未知({status})")
-        self.status_label.setText(f"状态: {text}")
         color = {0: "#4e9a06", 1: "#3465a4", 2: "#f57900"}.get(status, "#888")
-        self.status_label.setStyleSheet(f"{_STATUS_STYLE} color: {color};")
+        base = f"{_STATUS_STYLE} color: {color};"
+        for label in (self.status_label, self.run_status_label):
+            label.setText(f"状态: {text}")
+            label.setStyleSheet(scale_stylesheet(base, self._font_scale))
+            for i, (w, _) in enumerate(self._style_registry):
+                if w is label:
+                    self._style_registry[i] = (w, base)
+                    break
+
+        # Toggle pause/resume button
+        for btn in (self.btn_pause_resume, self.btn_run_pause_resume):
+            if status == 0:
+                btn.setText("暂停")
+                btn.setEnabled(False)
+                btn.setStyleSheet(scale_stylesheet(_BTN_CTRL_STYLE.format(
+                    bg="#f57900", border="#ce5c00", pressed="#a84b00"), self._font_scale))
+            elif status == 1:
+                btn.setText("暂停")
+                btn.setEnabled(True)
+                btn.setStyleSheet(scale_stylesheet(_BTN_CTRL_STYLE.format(
+                    bg="#f57900", border="#ce5c00", pressed="#a84b00"), self._font_scale))
+            elif status == 2:
+                btn.setText("继续")
+                btn.setEnabled(True)
+                btn.setStyleSheet(scale_stylesheet(_BTN_CTRL_STYLE.format(
+                    bg="#3465a4", border="#204a87", pressed="#153566"), self._font_scale))
 
     def update_position(self, addr: int, position: float):
         if addr != self.pump.addr:
             return
         self._current_pos = position
-        self.position_label.setText(f"位置: {position:.1f} um")
+        for label in (self.position_label, self.run_position_label):
+            label.setText(f"位置: {position:.1f} um")
 
         # Update run-mode progress
         if self._run_mode and self._run_total_um > 0:
             traveled = abs(position - self._run_start_pos)
             pct = min(100, int(traveled / self._run_total_um * 100))
-            self.progress_bar.setValue(pct)
+            injected_ml = pct / 100 * self._run_total_ml
+            self.run_progress_bar.setValue(pct)
+            self.run_progress_bar.setFormat(f"已注射 {injected_ml:.2f} mL")
 
             # Remaining time estimate
             if self._current_status == 1:  # running
@@ -707,8 +811,8 @@ class PumpWidget(QGroupBox):
                 if speed > 0 and remaining_um > 0:
                     secs = int(remaining_um / speed)
                     m, s = divmod(secs, 60)
-                    self.remain_label.setText(f"剩余: {m:02d}:{s:02d}")
+                    self.run_remain_label.setText(f"剩余: {m:02d}:{s:02d}")
                 else:
-                    self.remain_label.setText("剩余: 00:00")
+                    self.run_remain_label.setText("剩余: 00:00")
             elif self._current_status == 0:  # idle → finished
-                self.remain_label.setText("已完成")
+                self.run_remain_label.setText("已完成")

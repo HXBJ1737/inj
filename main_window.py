@@ -11,12 +11,12 @@ from PyQt5.QtGui import QFont
 
 from modbus_client import ModbusClient
 from pump_controller import PumpController
-from pump_widget import PumpWidget, PollWorker
+from pump_widget import PumpWidget, PollWorker, scale_stylesheet
 
 
 NUM_PUMPS = 15
-PUMPS_PER_TAB = 4
-NUM_TABS = 4
+PUMPS_PER_TAB = 5
+NUM_TABS = 3
 
 _TOOLBAR_STYLE = """
     QGroupBox { font-size: 14px; font-weight: bold;
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("注射泵 RS485 控制系统")
+        self.setMinimumSize(1280, 720)
         self.resize(1280, 720)
 
         self._client = ModbusClient()
@@ -51,8 +52,11 @@ class MainWindow(QMainWindow):
         self._pumps: dict[int, PumpController] = {}
         self._log_buffer: list[tuple[str, str]] = []  # (direction, msg)
         self._log_buffer_max = 5000
+        self._font_scale = 1.0
+        self._style_registry: list[tuple[object, str]] = []  # (widget, base_stylesheet)
 
         self._init_ui()
+        self._record_base_styles()
 
     def _init_ui(self):
         central = QWidget()
@@ -106,6 +110,47 @@ class MainWindow(QMainWindow):
         )
         self.btn_log.clicked.connect(self._toggle_log_panel)
         port_layout.addWidget(self.btn_log)
+
+        # Batch start / stop
+        self.btn_start_all = QPushButton("一键开始")
+        self.btn_start_all.setStyleSheet(
+            "QPushButton { background: #4e9a06; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 80px;"
+            "border-radius: 5px; border: 1px solid #3d7d05; }"
+            "QPushButton:pressed { background: #3d7d05; }"
+        )
+        self.btn_start_all.clicked.connect(self._start_all)
+        port_layout.addWidget(self.btn_start_all)
+
+        self.btn_stop_all = QPushButton("一键停止")
+        self.btn_stop_all.setStyleSheet(
+            "QPushButton { background: #cc0000; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 80px;"
+            "border-radius: 5px; border: 1px solid #a40000; }"
+            "QPushButton:pressed { background: #a40000; }"
+        )
+        self.btn_stop_all.clicked.connect(self._stop_all)
+        port_layout.addWidget(self.btn_stop_all)
+
+        self.btn_pause_all = QPushButton("一键暂停")
+        self.btn_pause_all.setStyleSheet(
+            "QPushButton { background: #f57900; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 80px;"
+            "border-radius: 5px; border: 1px solid #ce5c00; }"
+            "QPushButton:pressed { background: #ce5c00; }"
+        )
+        self.btn_pause_all.clicked.connect(self._pause_all)
+        port_layout.addWidget(self.btn_pause_all)
+
+        self.btn_resume_all = QPushButton("一键继续")
+        self.btn_resume_all.setStyleSheet(
+            "QPushButton { background: #3465a4; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 80px;"
+            "border-radius: 5px; border: 1px solid #204a87; }"
+            "QPushButton:pressed { background: #204a87; }"
+        )
+        self.btn_resume_all.clicked.connect(self._resume_all)
+        port_layout.addWidget(self.btn_resume_all)
 
         port_group.setLayout(port_layout)
         main_layout.addWidget(port_group)
@@ -202,7 +247,7 @@ class MainWindow(QMainWindow):
         # Log text area
         self._data_log = QTextEdit()
         self._data_log.setReadOnly(True)
-        self._data_log.setFont(QFont("Consolas", 10))
+        self._data_log.setFont(QFont("Consolas", 6))
         self._data_log.setStyleSheet(
             "QTextEdit { background: #1e1e1e; color: #d4d4d4; border: 1px solid #555; }"
         )
@@ -222,7 +267,10 @@ class MainWindow(QMainWindow):
             self._data_log.clear()
             for d, m in self._log_buffer:
                 self._append_log_line(d, m)
-            self._splitter.setSizes([3, 1])
+            total = self._splitter.height()
+            log_h =int(total // 2.6)
+            # print(f"Splitter total={total}, log={log_h}")
+            self._splitter.setSizes([total - log_h, log_h])
         else:
             self._log_panel.hide()
             self._splitter.setSizes([1, 0])
@@ -271,12 +319,16 @@ class MainWindow(QMainWindow):
 
         if self._client.connect():
             self.btn_connect.setText("断开")
-            self.btn_connect.setStyleSheet(
+            conn_btn_style = (
                 "QPushButton { background: #cc0000; font-weight: bold; }"
                 "QPushButton:pressed { background: #a40000; }"
             )
+            self.btn_connect.setStyleSheet(scale_stylesheet(conn_btn_style, self._font_scale))
+            self._update_style_registry(self.btn_connect, conn_btn_style)
             self.conn_status_label.setText(f"已连接 ({port})")
-            self.conn_status_label.setStyleSheet("font-size: 14px; color: #4e9a06; font-weight: bold;")
+            conn_lbl_style = "font-size: 14px; color: #4e9a06; font-weight: bold;"
+            self.conn_status_label.setStyleSheet(scale_stylesheet(conn_lbl_style, self._font_scale))
+            self._update_style_registry(self.conn_status_label, conn_lbl_style)
             self.status_bar.showMessage(f"已连接到 {port}，波特率 {baud}")
             self._start_polling()
         else:
@@ -287,12 +339,16 @@ class MainWindow(QMainWindow):
         self._stop_polling()
         self._client.disconnect()
         self.btn_connect.setText("连接")
-        self.btn_connect.setStyleSheet(
+        conn_btn_style = (
             "QPushButton { background: #4e9a06; font-weight: bold; }"
             "QPushButton:pressed { background: #3d7d05; }"
         )
+        self.btn_connect.setStyleSheet(scale_stylesheet(conn_btn_style, self._font_scale))
+        self._update_style_registry(self.btn_connect, conn_btn_style)
         self.conn_status_label.setText("未连接")
-        self.conn_status_label.setStyleSheet("font-size: 14px; color: red; font-weight: bold;")
+        conn_lbl_style = "font-size: 14px; color: red; font-weight: bold;"
+        self.conn_status_label.setStyleSheet(scale_stylesheet(conn_lbl_style, self._font_scale))
+        self._update_style_registry(self.conn_status_label, conn_lbl_style)
         self.status_bar.showMessage("已断开连接")
 
     # ── Polling ──
@@ -313,6 +369,97 @@ class MainWindow(QMainWindow):
 
     def _show_feedback(self, msg: str):
         self.status_bar.showMessage(msg)
+
+    # ── Batch operations ──
+
+    def _start_all(self):
+        for w in self._pump_widgets.values():
+            if w._enabled:
+                if w._run_mode:
+                    w._run_start()
+                else:
+                    w._start()
+        self.status_bar.showMessage("一键开始：已发送所有启用泵的启动指令")
+
+    def _stop_all(self):
+        for w in self._pump_widgets.values():
+            if w._enabled:
+                if w._run_mode:
+                    w._run_stop()
+                else:
+                    w._stop()
+        self.status_bar.showMessage("一键停止：已发送所有启用泵的停止指令")
+
+    def _pause_all(self):
+        for w in self._pump_widgets.values():
+            if w._enabled:
+                w._pause()
+        self.status_bar.showMessage("一键暂停：已发送所有启用泵的暂停指令")
+
+    def _resume_all(self):
+        for w in self._pump_widgets.values():
+            if w._enabled:
+                w._resume()
+        self.status_bar.showMessage("一键继续：已发送所有启用泵的继续指令")
+
+    # ── Font scaling ──
+
+    def _record_base_styles(self):
+        """Walk the widget tree and record all set stylesheets as base (scale=1.0)."""
+        self._style_registry.clear()
+        central = self.centralWidget()
+        if central:
+            for child in central.findChildren(QWidget):
+                # Skip pump widgets — they self-manage their own scaling
+                if isinstance(child, PumpWidget):
+                    continue
+                parent = child.parent()
+                while parent:
+                    if isinstance(parent, PumpWidget):
+                        break
+                    parent = parent.parent()
+                else:
+                    ss = child.styleSheet()
+                    if ss:
+                        self._style_registry.append((child, ss))
+        ss = central.styleSheet() if central else ""
+        if ss:
+            self._style_registry.append((central, ss))
+        self._log_font_base_size = 6
+
+    def _update_style_registry(self, widget, base: str):
+        """Update or add a widget's base stylesheet in the registry."""
+        for i, (w, _) in enumerate(self._style_registry):
+            if w is widget:
+                self._style_registry[i] = (widget, base)
+                return
+        self._style_registry.append((widget, base))
+
+    def _apply_scale(self, scale: float):
+        """Reapply all registered stylesheets scaled by the given factor."""
+        for widget, base in self._style_registry:
+            try:
+                widget.setStyleSheet(scale_stylesheet(base, scale))
+            except RuntimeError:
+                pass
+        # Scale the log font
+        try:
+            self._data_log.setFont(QFont("Consolas", max(6, round(self._log_font_base_size * scale))))
+        except Exception:
+            pass
+        # Propagate to pump widgets
+        for pw in self._pump_widgets.values():
+            pw.set_font_scale(scale)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w = self.width()
+        h = self.height()
+        scale = min(w / 1280, h / 720)
+        scale = max(0.7, min(2.5, scale))
+        if abs(scale - self._font_scale) >= 0.01:
+            self._font_scale = scale
+            self._apply_scale(scale)
 
     # ── Data logger callback ──
 
