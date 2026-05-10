@@ -19,7 +19,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/<用户名>/raspi-inj.git
+git clone https://github.com/HXBJ1737/inj.git
 cd raspi-inj
 
 # 创建虚拟环境
