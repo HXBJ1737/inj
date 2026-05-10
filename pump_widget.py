@@ -431,6 +431,9 @@ class PumpWidget(QGroupBox):
         self.run_volume_input = TouchLineEdit("1.0")
         self.run_volume_input.setStyleSheet(_INPUT_STYLE)
         grid.addWidget(self.run_volume_input, 1, 1)
+        self._vol_um_label = QLabel("")
+        self._vol_um_label.setStyleSheet(_LABEL_STYLE)
+        grid.addWidget(self._vol_um_label, 1, 2)
 
         # Speed input (mL/min)
         lbl3 = QLabel("速度 (mL/min):")
@@ -439,6 +442,9 @@ class PumpWidget(QGroupBox):
         self.run_speed_input = TouchLineEdit("1.0")
         self.run_speed_input.setStyleSheet(_INPUT_STYLE)
         grid.addWidget(self.run_speed_input, 2, 1)
+        self._spd_ums_label = QLabel("")
+        self._spd_ums_label.setStyleSheet(_LABEL_STYLE)
+        grid.addWidget(self._spd_ums_label, 2, 2)
 
         # Column 0 (labels) tight, column 1 (inputs) stretchy, column 2 (info) auto
         grid.setColumnStretch(0, 0)
@@ -470,6 +476,10 @@ class PumpWidget(QGroupBox):
 
         # Trigger initial calculation
         self._on_syringe_changed(self.syringe_combo.currentText())
+
+        # Update conversion labels on input change
+        self.run_volume_input.textChanged.connect(self._update_run_conversion)
+        self.run_speed_input.textChanged.connect(self._update_run_conversion)
 
         return page
 
@@ -555,6 +565,32 @@ class PumpWidget(QGroupBox):
             self.syringe_info.setText(f"满刻度:\n{volume_ml}mL/{length_um/1000:.1f}mm")
         else:
             self.syringe_info.setText("")
+        self._update_run_conversion()
+
+    def _update_run_conversion(self):
+        model = self.syringe_combo.currentText()
+        info = _SYRINGE_DB.get(model, {})
+        if isinstance(info, dict):
+            length_um = info.get("length_um", 0)
+            volume_ml = info.get("volume_ml", 1)
+        else:
+            length_um = 0
+            volume_ml = 1
+
+        um_per_mL = length_um / volume_ml if volume_ml > 0 else 0
+
+        try:
+            vol_ml = float(self.run_volume_input.text())
+            self._vol_um_label.setText(f"= {vol_ml * um_per_mL:.1f} um")
+        except ValueError:
+            self._vol_um_label.setText("")
+
+        try:
+            spd_ml_min = float(self.run_speed_input.text())
+            spd_um_s = spd_ml_min * um_per_mL / 60.0
+            self._spd_ums_label.setText(f"= {spd_um_s:.2f} um/s")
+        except ValueError:
+            self._spd_ums_label.setText("")
 
     # ── Run mode commands ──
 
