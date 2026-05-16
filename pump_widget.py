@@ -226,7 +226,7 @@ QGroupBox::title {
 }
 """
 
-_LABEL_STYLE = "font-size: 11px;"
+_LABEL_STYLE = "font-size: 15px;"
 
 _INPUT_STYLE = """
     font-size: 13px; min-height: 40px;
@@ -306,7 +306,10 @@ class PumpWidget(QGroupBox):
         # --- Enable + mode row ---
         top_row = QHBoxLayout()
         self.enable_cb = QCheckBox("启用")
-        self.enable_cb.setStyleSheet("font-size: 14px; font-weight: bold; padding: 4px;")
+        self.enable_cb.setStyleSheet(
+            "QCheckBox { font-size: 14px; font-weight: bold; padding: 4px; spacing: 6px; }"
+            "QCheckBox::indicator { width: 22px; height: 22px; }"
+        )
         self.enable_cb.toggled.connect(self._toggle_enable)
         top_row.addWidget(self.enable_cb)
 
@@ -363,6 +366,18 @@ class PumpWidget(QGroupBox):
         self.speed_input = add_input(0, "速度 (um/s):", "1000")
         self.accel_input = add_input(1, "加速度 (1-100):", "80")
         self.incr_input = add_input(2, "增量位移 (um):", "1000", allow_neg=True)
+
+        # Absolute position (has its own button, not part of start)
+        lbl = QLabel("绝对位置 (um):")
+        lbl.setStyleSheet(_LABEL_STYLE)
+        grid.addWidget(lbl, 3, 0)
+        self.abs_input = TouchLineEdit("0", allow_negative=True)
+        self.abs_input.setStyleSheet(_INPUT_STYLE)
+        grid.addWidget(self.abs_input, 3, 1)
+        btn_abs = QPushButton("移动")
+        btn_abs.setStyleSheet(_BTN_SET_STYLE)
+        btn_abs.clicked.connect(self._set_absolute)
+        grid.addWidget(btn_abs, 3, 2)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
@@ -524,6 +539,28 @@ class PumpWidget(QGroupBox):
         ok = self.pump.set_current_position_zero()
         self.feedback.emit(f"泵{self.pump.addr}: 设为零点 {'成功' if ok else '失败'}")
 
+    def _set_absolute(self):
+        addr = self.pump.addr
+        try:
+            speed_val = float(self.speed_input.text())
+        except ValueError:
+            self.feedback.emit(f"泵{addr}: 速度值无效")
+            return
+        try:
+            pos_val = float(self.abs_input.text())
+        except ValueError:
+            self.feedback.emit(f"泵{addr}: 位置值无效")
+            return
+
+        if not self.pump.set_speed(speed_val):
+            self.feedback.emit(f"泵{addr}: 设置速度失败")
+            return
+        if not self.pump.set_absolute_position(pos_val):
+            self.feedback.emit(f"泵{addr}: 设置绝对位置失败")
+            return
+        ok = self.pump.start()
+        self.feedback.emit(f"泵{addr}: 速度{speed_val}um/s 移动到{pos_val}um 开始{'成功' if ok else '失败'}")
+
     def _start(self):
         addr = self.pump.addr
         try:
@@ -597,7 +634,7 @@ class PumpWidget(QGroupBox):
             length_um = info
             volume_ml = 1
         if volume_ml > 0:
-            self.syringe_info.setText(f"满刻度:\n{volume_ml}mL/{length_um/1000:.1f}mm")
+            self.syringe_info.setText(f"满刻度:{length_um/1000:.1f}mm")
         else:
             self.syringe_info.setText("")
         self._update_run_conversion()
@@ -616,14 +653,14 @@ class PumpWidget(QGroupBox):
 
         try:
             vol_ml = float(self.run_volume_input.text())
-            self._vol_um_label.setText(f"= {vol_ml * um_per_mL:.1f} um")
+            self._vol_um_label.setText(f"{vol_ml * um_per_mL:.1f}um")
         except ValueError:
             self._vol_um_label.setText("")
 
         try:
             spd_ml_min = float(self.run_speed_input.text())
             spd_um_s = spd_ml_min * um_per_mL / 60.0
-            self._spd_ums_label.setText(f"= {spd_um_s:.2f} um/s")
+            self._spd_ums_label.setText(f"{spd_um_s:.2f}um/s")
         except ValueError:
             self._spd_ums_label.setText("")
 

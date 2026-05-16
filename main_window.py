@@ -3,10 +3,10 @@
 import serial.tools.list_ports
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
-    QLabel, QComboBox, QPushButton, QStatusBar, QGroupBox,
-    QMessageBox, QScrollArea, QTextEdit, QSplitter,
+    QLabel, QComboBox, QPushButton, QCheckBox, QStatusBar, QGroupBox,
+    QMessageBox, QScrollArea, QTextEdit, QSplitter, QApplication,
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QEvent, QTimer
 from PyQt5.QtGui import QFont
 
 from modbus_client import ModbusClient
@@ -15,8 +15,8 @@ from pump_widget import PumpWidget, PollWorker, scale_stylesheet
 
 
 NUM_PUMPS = 15
-PUMPS_PER_TAB = 5
-NUM_TABS = 3
+PUMPS_PER_TAB = 4
+NUM_TABS = 4
 
 _TOOLBAR_STYLE = """
     QGroupBox { font-size: 14px; font-weight: bold;
@@ -43,8 +43,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("注射泵 RS485 控制系统")
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setMinimumSize(1280, 720)
         self.resize(1280, 720)
+        self._drag_pos = None
 
         self._client = ModbusClient()
         self._poll_worker = None
@@ -66,8 +68,9 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(6)
 
         # --- Serial port controls ---
-        port_group = QGroupBox("串口设置")
-        port_group.setStyleSheet(_TOOLBAR_STYLE)
+        self._port_group = QGroupBox("串口设置")
+        self._port_group.setStyleSheet(_TOOLBAR_STYLE)
+        self._port_group.installEventFilter(self)
         port_layout = QHBoxLayout()
         port_layout.setSpacing(10)
 
@@ -152,8 +155,30 @@ class MainWindow(QMainWindow):
         self.btn_resume_all.clicked.connect(self._resume_all)
         port_layout.addWidget(self.btn_resume_all)
 
-        port_group.setLayout(port_layout)
-        main_layout.addWidget(port_group)
+        port_layout.addSpacing(20)
+
+        self.btn_maximize = QPushButton("最大化")
+        self.btn_maximize.setStyleSheet(
+            "QPushButton { background: #555; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 56px;"
+            "border-radius: 5px; border: 1px solid #555; }"
+            "QPushButton:pressed { background: #5294e2; }"
+        )
+        self.btn_maximize.clicked.connect(self._toggle_maximize)
+        port_layout.addWidget(self.btn_maximize)
+
+        btn_close = QPushButton("关闭")
+        btn_close.setStyleSheet(
+            "QPushButton { background: #555; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 44px;"
+            "border-radius: 5px; border: 1px solid #555; }"
+            "QPushButton:pressed { background: #cc0000; }"
+        )
+        btn_close.clicked.connect(self._quit_app)
+        port_layout.addWidget(btn_close)
+
+        self._port_group.setLayout(port_layout)
+        main_layout.addWidget(self._port_group)
 
         # --- Splitter: tabs (top) + log panel (bottom) ---
         self._splitter = QSplitter(Qt.Vertical)
@@ -474,6 +499,36 @@ class MainWindow(QMainWindow):
         # Forward to log panel if visible
         if self._log_panel.isVisible():
             self._append_log_line(direction, msg)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            child = QApplication.widgetAt(event.globalPos())
+            if child and isinstance(child, (QPushButton, QComboBox, QCheckBox)):
+                return False
+            self._drag_pos = event.globalPos()
+            return True
+        if event.type() == QEvent.MouseMove and self._drag_pos is not None:
+            delta = event.globalPos() - self._drag_pos
+            self.move(self.pos() + delta)
+            self._drag_pos = event.globalPos()
+            return True
+        if event.type() == QEvent.MouseButtonRelease:
+            self._drag_pos = None
+            return True
+        return super().eventFilter(obj, event)
+
+    def _quit_app(self):
+        self._stop_polling()
+        self._client.disconnect()
+        QApplication.instance().quit()
+
+    def _toggle_maximize(self):
+        if self.isFullScreen():
+            self.showNormal()
+            self.btn_maximize.setText("最大化")
+        else:
+            self.showFullScreen()
+            self.btn_maximize.setText("还原")
 
     def closeEvent(self, event):
         self._stop_polling()
