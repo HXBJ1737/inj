@@ -1,10 +1,12 @@
 """Main application window — 3 tabs x 5 pump columns with serial port controls."""
 
+import json
+import os
 import serial.tools.list_ports
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QLabel, QComboBox, QPushButton, QCheckBox, QStatusBar, QGroupBox,
-    QMessageBox, QScrollArea, QTextEdit, QSplitter, QApplication,
+    QMessageBox, QScrollArea, QTextEdit, QDialog, QApplication,
 )
 from PyQt5.QtCore import Qt, QEvent, QTimer
 from PyQt5.QtGui import QFont
@@ -37,13 +39,82 @@ _TAB_STYLE = """
 """
 
 
+# ── Serial log popup window ────────────────────────────────────
+
+class SerialLogWindow(QDialog):
+    """Popup window for serial data log."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("串口数据")
+        self.setMinimumSize(700, 400)
+        self._auto_scroll = True
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
+
+        btn_clear = QPushButton("清空")
+        btn_clear.clicked.connect(lambda: self.data_log.clear())
+        toolbar.addWidget(btn_clear)
+
+        self.btn_auto_scroll = QPushButton("自动滚动: 开")
+        self.btn_auto_scroll.setCheckable(True)
+        self.btn_auto_scroll.setChecked(True)
+        self.btn_auto_scroll.clicked.connect(self._toggle_auto_scroll)
+        toolbar.addWidget(self.btn_auto_scroll)
+
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self.data_log = QTextEdit()
+        self.data_log.setReadOnly(True)
+        self.data_log.setFont(QFont("Consolas", 10))
+        self.data_log.setStyleSheet(
+            "QTextEdit { background: #1e1e1e; color: #d4d4d4; border: 1px solid #555; }"
+        )
+        layout.addWidget(self.data_log)
+
+    def _toggle_auto_scroll(self):
+        self._auto_scroll = self.btn_auto_scroll.isChecked()
+        self.btn_auto_scroll.setText(f"自动滚动: {'开' if self._auto_scroll else '关'}")
+
+    def append_log(self, direction: str, msg: str):
+        try:
+            color_map = {
+                "TX": "#5294e2",
+                "RX": "#4e9a06",
+                "ERR": "#cc0000",
+                "SYS": "#f57900",
+            }
+            color = color_map.get(direction, "#d4d4d4")
+            tag = f'<span style="color:{color};font-weight:bold;">[{direction}]</span>'
+            self.data_log.append(f'{tag} {msg}')
+            if self._auto_scroll:
+                sb = self.data_log.verticalScrollBar()
+                sb.setValue(sb.maximum())
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        parent = self.parent()
+        if parent and hasattr(parent, '_on_log_window_closed'):
+            parent._on_log_window_closed()
+        event.accept()
+
+
 # ── Main window ────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("注射泵 RS485 控制系统")
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setMinimumSize(1280, 720)
         self.resize(1280, 720)
         self._drag_pos = None
@@ -52,6 +123,7 @@ class MainWindow(QMainWindow):
         self._poll_worker = None
         self._pump_widgets: dict[int, PumpWidget] = {}
         self._pumps: dict[int, PumpController] = {}
+        self._log_window = None
         self._log_buffer: list[tuple[str, str]] = []  # (direction, msg)
         self._log_buffer_max = 5000
         self._font_scale = 1.0
@@ -71,23 +143,29 @@ class MainWindow(QMainWindow):
         self._port_group = QGroupBox("串口设置")
         self._port_group.setStyleSheet(_TOOLBAR_STYLE)
         self._port_group.installEventFilter(self)
-        port_layout = QHBoxLayout()
-        port_layout.setSpacing(10)
+        port_vbox = QVBoxLayout()
+        port_vbox.setSpacing(6)
 
-        port_layout.addWidget(QLabel("串口:"))
+        # Row 1: connection controls
+        row1 = QHBoxLayout()
+        row1.setSpacing(10)
+
+        row1.addWidget(QLabel("串口:"))
         self.port_combo = QComboBox()
+        self.port_combo.setStyleSheet("QComboBox { min-width: 60px; max-width: 100px; }")
         self._refresh_ports()
-        port_layout.addWidget(self.port_combo)
+        row1.addWidget(self.port_combo)
 
         btn_refresh = QPushButton("刷新")
         btn_refresh.clicked.connect(self._refresh_ports)
-        port_layout.addWidget(btn_refresh)
+        row1.addWidget(btn_refresh)
 
-        port_layout.addWidget(QLabel("波特率:"))
+        row1.addWidget(QLabel("波特率:"))
         self.baud_combo = QComboBox()
+        self.baud_combo.setStyleSheet("QComboBox { min-width: 60px; max-width: 90px; }")
         self.baud_combo.addItems(["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"])
         self.baud_combo.setCurrentText("9600")
-        port_layout.addWidget(self.baud_combo)
+        row1.addWidget(self.baud_combo)
 
         self.btn_connect = QPushButton("连接")
         self.btn_connect.setStyleSheet(
@@ -95,13 +173,13 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background: #3d7d05; }"
         )
         self.btn_connect.clicked.connect(self._toggle_connection)
-        port_layout.addWidget(self.btn_connect)
+        row1.addWidget(self.btn_connect)
 
         self.conn_status_label = QLabel("未连接")
         self.conn_status_label.setStyleSheet("font-size: 14px; color: red; font-weight: bold;")
-        port_layout.addWidget(self.conn_status_label)
+        row1.addWidget(self.conn_status_label)
 
-        port_layout.addStretch()
+        row1.addStretch()
 
         # Log toggle button
         self.btn_log = QPushButton("串口日志")
@@ -111,51 +189,36 @@ class MainWindow(QMainWindow):
             "QPushButton { background: #555; }"
             "QPushButton:checked { background: #5294e2; }"
         )
-        self.btn_log.clicked.connect(self._toggle_log_panel)
-        port_layout.addWidget(self.btn_log)
+        self.btn_log.clicked.connect(self._toggle_log_window)
+        row1.addWidget(self.btn_log)
 
-        # Batch start / stop
-        self.btn_start_all = QPushButton("一键开始")
-        self.btn_start_all.setStyleSheet(
-            "QPushButton { background: #4e9a06; font-weight: bold; color: white;"
-            "font-size: 14px; min-height: 34px; min-width: 80px;"
-            "border-radius: 5px; border: 1px solid #3d7d05; }"
-            "QPushButton:pressed { background: #3d7d05; }"
+        row1.addSpacing(10)
+
+        row1.addWidget(QLabel("预设:"))
+        self.preset_combo = QComboBox()
+        self.preset_combo.setStyleSheet("QComboBox { min-width: 50px; max-width: 80px; }")
+        self.preset_combo.addItems(["1", "2", "3"])
+        row1.addWidget(self.preset_combo)
+
+        btn_save = QPushButton("保存")
+        btn_save.setStyleSheet(
+            "QPushButton { background: #555; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 50px;"
+            "border-radius: 5px; border: 1px solid #555; }"
+            "QPushButton:pressed { background: #5294e2; }"
         )
-        self.btn_start_all.clicked.connect(self._start_all)
-        port_layout.addWidget(self.btn_start_all)
+        btn_save.clicked.connect(self._save_preset)
+        row1.addWidget(btn_save)
 
-        self.btn_stop_all = QPushButton("一键停止")
-        self.btn_stop_all.setStyleSheet(
-            "QPushButton { background: #cc0000; font-weight: bold; color: white;"
-            "font-size: 14px; min-height: 34px; min-width: 80px;"
-            "border-radius: 5px; border: 1px solid #a40000; }"
-            "QPushButton:pressed { background: #a40000; }"
+        btn_load = QPushButton("加载")
+        btn_load.setStyleSheet(
+            "QPushButton { background: #555; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 50px;"
+            "border-radius: 5px; border: 1px solid #555; }"
+            "QPushButton:pressed { background: #5294e2; }"
         )
-        self.btn_stop_all.clicked.connect(self._stop_all)
-        port_layout.addWidget(self.btn_stop_all)
-
-        self.btn_pause_all = QPushButton("一键暂停")
-        self.btn_pause_all.setStyleSheet(
-            "QPushButton { background: #f57900; font-weight: bold; color: white;"
-            "font-size: 14px; min-height: 34px; min-width: 80px;"
-            "border-radius: 5px; border: 1px solid #ce5c00; }"
-            "QPushButton:pressed { background: #ce5c00; }"
-        )
-        self.btn_pause_all.clicked.connect(self._pause_all)
-        port_layout.addWidget(self.btn_pause_all)
-
-        self.btn_resume_all = QPushButton("一键继续")
-        self.btn_resume_all.setStyleSheet(
-            "QPushButton { background: #3465a4; font-weight: bold; color: white;"
-            "font-size: 14px; min-height: 34px; min-width: 80px;"
-            "border-radius: 5px; border: 1px solid #204a87; }"
-            "QPushButton:pressed { background: #204a87; }"
-        )
-        self.btn_resume_all.clicked.connect(self._resume_all)
-        port_layout.addWidget(self.btn_resume_all)
-
-        port_layout.addSpacing(20)
+        btn_load.clicked.connect(self._load_preset)
+        row1.addWidget(btn_load)
 
         self.btn_maximize = QPushButton("最大化")
         self.btn_maximize.setStyleSheet(
@@ -165,7 +228,7 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background: #5294e2; }"
         )
         self.btn_maximize.clicked.connect(self._toggle_maximize)
-        port_layout.addWidget(self.btn_maximize)
+        row1.addWidget(self.btn_maximize)
 
         btn_close = QPushButton("关闭")
         btn_close.setStyleSheet(
@@ -175,16 +238,62 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background: #cc0000; }"
         )
         btn_close.clicked.connect(self._quit_app)
-        port_layout.addWidget(btn_close)
+        row1.addWidget(btn_close)
 
-        self._port_group.setLayout(port_layout)
+        port_vbox.addLayout(row1)
+
+        # Row 2: batch operations & presets
+        row2 = QHBoxLayout()
+        row2.setSpacing(10)
+        row2.addStretch()
+
+        self.btn_start_all = QPushButton("一键开始")
+        self.btn_start_all.setStyleSheet(
+            "QPushButton { background: #4e9a06; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 80px;"
+            "border-radius: 5px; border: 1px solid #3d7d05; }"
+            "QPushButton:pressed { background: #3d7d05; }"
+        )
+        self.btn_start_all.clicked.connect(self._start_all)
+        row2.addWidget(self.btn_start_all)
+
+        self.btn_stop_all = QPushButton("一键停止")
+        self.btn_stop_all.setStyleSheet(
+            "QPushButton { background: #cc0000; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 80px;"
+            "border-radius: 5px; border: 1px solid #a40000; }"
+            "QPushButton:pressed { background: #a40000; }"
+        )
+        self.btn_stop_all.clicked.connect(self._stop_all)
+        row2.addWidget(self.btn_stop_all)
+
+        self.btn_pause_all = QPushButton("一键暂停")
+        self.btn_pause_all.setStyleSheet(
+            "QPushButton { background: #f57900; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 80px;"
+            "border-radius: 5px; border: 1px solid #ce5c00; }"
+            "QPushButton:pressed { background: #ce5c00; }"
+        )
+        self.btn_pause_all.clicked.connect(self._pause_all)
+        row2.addWidget(self.btn_pause_all)
+
+        self.btn_resume_all = QPushButton("一键继续")
+        self.btn_resume_all.setStyleSheet(
+            "QPushButton { background: #3465a4; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 80px;"
+            "border-radius: 5px; border: 1px solid #204a87; }"
+            "QPushButton:pressed { background: #204a87; }"
+        )
+        self.btn_resume_all.clicked.connect(self._resume_all)
+        row2.addWidget(self.btn_resume_all)
+
+        row2.addStretch()
+        port_vbox.addLayout(row2)
+
+        self._port_group.setLayout(port_vbox)
         main_layout.addWidget(self._port_group)
 
-        # --- Splitter: tabs (top) + log panel (bottom) ---
-        self._splitter = QSplitter(Qt.Vertical)
-        self._splitter.setHandleWidth(4)
-
-        # Tab widget with pump columns
+        # --- Tab widget with pump columns ---
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(_TAB_STYLE)
 
@@ -214,16 +323,7 @@ class MainWindow(QMainWindow):
             scroll.setStyleSheet("QScrollArea { border: none; }")
             self.tabs.addTab(scroll, f"泵 {start_addr:02d}-{end_addr:02d}")
 
-        self._splitter.addWidget(self.tabs)
-
-        # Log panel (hidden by default)
-        self._log_panel = self._build_log_panel()
-        self._splitter.addWidget(self._log_panel)
-        self._log_panel.hide()
-
-        # Default splitter sizes: tabs gets all space
-        self._splitter.setSizes([1, 0])
-        main_layout.addWidget(self._splitter)
+        main_layout.addWidget(self.tabs)
 
         # Connect data logger
         self._client.set_data_logger(self._on_serial_data)
@@ -234,89 +334,22 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就绪")
 
-    def _build_log_panel(self) -> QWidget:
-        """Build the embedded serial log panel."""
-        panel = QWidget()
-        vbox = QVBoxLayout(panel)
-        vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.setSpacing(4)
-
-        # Toolbar
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(10)
-
-        lbl = QLabel("串口日志")
-        lbl.setStyleSheet("font-size: 13px; font-weight: bold;")
-        toolbar.addWidget(lbl)
-
-        btn_clear = QPushButton("清空")
-        btn_clear.setStyleSheet(
-            "QPushButton { font-size: 12px; min-height: 28px; min-width: 50px; }"
-        )
-        btn_clear.clicked.connect(lambda: self._data_log.clear())
-        toolbar.addWidget(btn_clear)
-
-        self._btn_auto_scroll = QPushButton("自动滚动: 开")
-        self._btn_auto_scroll.setCheckable(True)
-        self._btn_auto_scroll.setChecked(True)
-        self._btn_auto_scroll.setStyleSheet(
-            "QPushButton { font-size: 12px; min-height: 28px; min-width: 80px; }"
-            "QPushButton:checked { background: #5294e2; }"
-        )
-        self._btn_auto_scroll.clicked.connect(self._toggle_auto_scroll)
-        toolbar.addWidget(self._btn_auto_scroll)
-
-        toolbar.addStretch()
-        vbox.addLayout(toolbar)
-
-        # Log text area
-        self._data_log = QTextEdit()
-        self._data_log.setReadOnly(True)
-        self._data_log.setFont(QFont("Consolas", 6))
-        self._data_log.setStyleSheet(
-            "QTextEdit { background: #1e1e1e; color: #d4d4d4; border: 1px solid #555; }"
-        )
-        vbox.addWidget(self._data_log)
-
-        self._auto_scroll = True
-        return panel
-
-    def _toggle_auto_scroll(self):
-        self._auto_scroll = self._btn_auto_scroll.isChecked()
-        self._btn_auto_scroll.setText(f"自动滚动: {'开' if self._auto_scroll else '关'}")
-
-    def _toggle_log_panel(self, checked):
+    def _toggle_log_window(self, checked):
         if checked:
-            self._log_panel.show()
-            # Replay buffered entries
-            self._data_log.clear()
+            if self._log_window is None:
+                self._log_window = SerialLogWindow(parent=self)
+            self._log_window.data_log.clear()
             for d, m in self._log_buffer:
-                self._append_log_line(d, m)
-            total = self._splitter.height()
-            log_h =int(total // 2.6)
-            # print(f"Splitter total={total}, log={log_h}")
-            self._splitter.setSizes([total - log_h, log_h])
+                self._log_window.append_log(d, m)
+            self._log_window.show()
+            self._log_window.raise_()
+            self._log_window.activateWindow()
         else:
-            self._log_panel.hide()
-            self._splitter.setSizes([1, 0])
+            if self._log_window:
+                self._log_window.close()
 
-    def _append_log_line(self, direction: str, msg: str):
-        """Append a colored log line to the embedded log."""
-        try:
-            color_map = {
-                "TX": "#5294e2",
-                "RX": "#4e9a06",
-                "ERR": "#cc0000",
-                "SYS": "#f57900",
-            }
-            color = color_map.get(direction, "#d4d4d4")
-            tag = f'<span style="color:{color};font-weight:bold;">[{direction}]</span>'
-            self._data_log.append(f'{tag} {msg}')
-            if self._auto_scroll:
-                sb = self._data_log.verticalScrollBar()
-                sb.setValue(sb.maximum())
-        except Exception:
-            pass
+    def _on_log_window_closed(self):
+        self.btn_log.setChecked(False)
 
     # ── Serial port ──
 
@@ -427,6 +460,53 @@ class MainWindow(QMainWindow):
                 w._resume()
         self.status_bar.showMessage("一键继续：已发送所有启用泵的继续指令")
 
+    # ── Preset save / load ──
+
+    _PRESET_FILE = "presets.json"
+
+    def _load_all_presets(self) -> dict:
+        if os.path.isfile(self._PRESET_FILE):
+            try:
+                with open(self._PRESET_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_all_presets(self, data: dict):
+        with open(self._PRESET_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _save_preset(self):
+        slot = self.preset_combo.currentText()
+        reply = QMessageBox.question(
+            self, "保存预设", f"确定覆盖预设 {slot}？",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        all_presets = self._load_all_presets()
+        all_presets[slot] = {
+            "pumps": {str(addr): w.get_params() for addr, w in self._pump_widgets.items()}
+        }
+        try:
+            self._save_all_presets(all_presets)
+            self.status_bar.showMessage(f"预设 {slot} 已保存")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"保存失败: {e}")
+
+    def _load_preset(self):
+        slot = self.preset_combo.currentText()
+        all_presets = self._load_all_presets()
+        preset = all_presets.get(slot)
+        if not preset:
+            self.status_bar.showMessage(f"预设 {slot} 不存在")
+            return
+        for addr_str, params in preset.get("pumps", {}).items():
+            addr = int(addr_str)
+            if addr in self._pump_widgets:
+                self._pump_widgets[addr].set_params(params)
+        self.status_bar.showMessage(f"预设 {slot} 已加载")
+
     # ── Font scaling ──
 
     def _record_base_styles(self):
@@ -450,7 +530,6 @@ class MainWindow(QMainWindow):
         ss = central.styleSheet() if central else ""
         if ss:
             self._style_registry.append((central, ss))
-        self._log_font_base_size = 6
 
     def _update_style_registry(self, widget, base: str):
         """Update or add a widget's base stylesheet in the registry."""
@@ -467,9 +546,10 @@ class MainWindow(QMainWindow):
                 widget.setStyleSheet(scale_stylesheet(base, scale))
             except RuntimeError:
                 pass
-        # Scale the log font
+        # Scale the log window font
         try:
-            self._data_log.setFont(QFont("Consolas", max(6, round(self._log_font_base_size * scale))))
+            if self._log_window:
+                self._log_window.data_log.setFont(QFont("Consolas", max(8, round(10 * scale))))
         except Exception:
             pass
         # Propagate to pump widgets
@@ -496,9 +576,9 @@ class MainWindow(QMainWindow):
         self._log_buffer.append((direction, msg))
         if len(self._log_buffer) > self._log_buffer_max:
             self._log_buffer = self._log_buffer[-self._log_buffer_max:]
-        # Forward to log panel if visible
-        if self._log_panel.isVisible():
-            self._append_log_line(direction, msg)
+        # Forward to log window if visible
+        if self._log_window and self._log_window.isVisible():
+            self._log_window.append_log(direction, msg)
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -533,4 +613,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._stop_polling()
         self._client.disconnect()
+        if self._log_window:
+            self._log_window.close()
         event.accept()

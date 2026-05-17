@@ -287,6 +287,7 @@ class PumpWidget(QGroupBox):
         self._enabled = False
         self._run_mode = False  # False=debug, True=run
         self._run_total_um = 0.0
+        self._run_total_g = 0.0
         self._run_speed_um_s = 0.0
         self._run_start_pos = 0.0
         self._current_pos = 0.0
@@ -341,6 +342,57 @@ class PumpWidget(QGroupBox):
         layout.addWidget(self.stack)
 
         layout.addStretch()
+
+    # ── Preset save/load ──
+
+    def get_params(self) -> dict:
+        """Return current parameter values as a dict."""
+        return {
+            "enabled": self._enabled,
+            "run_mode": self._run_mode,
+            "debug": {
+                "speed": self.speed_input.text(),
+                "accel": self.accel_input.text(),
+                "increment": self.incr_input.text(),
+                "abs_position": self.abs_input.text(),
+            },
+            "run": {
+                "syringe_model": self.syringe_combo.currentText(),
+                "density": self.run_density_input.text(),
+                "volume": self.run_volume_input.text(),
+                "speed": self.run_speed_input.text(),
+            },
+        }
+
+    def set_params(self, params: dict):
+        """Load parameter values from a dict."""
+        debug = params.get("debug", {})
+        if "speed" in debug:
+            self.speed_input.setText(debug["speed"])
+        if "accel" in debug:
+            self.accel_input.setText(debug["accel"])
+        if "increment" in debug:
+            self.incr_input.setText(debug["increment"])
+        if "abs_position" in debug:
+            self.abs_input.setText(debug["abs_position"])
+
+        run = params.get("run", {})
+        if "syringe_model" in run:
+            idx = self.syringe_combo.findText(run["syringe_model"])
+            if idx >= 0:
+                self.syringe_combo.setCurrentIndex(idx)
+        if "density" in run:
+            self.run_density_input.setText(run["density"])
+        if "volume" in run:
+            self.run_volume_input.setText(run["volume"])
+        if "speed" in run:
+            self.run_speed_input.setText(run["speed"])
+
+        if params.get("run_mode", False):
+            self._switch_mode(True)
+        else:
+            self._switch_mode(False)
+        self.enable_cb.setChecked(params.get("enabled", False))
 
     # ── Debug page ──
 
@@ -412,13 +464,15 @@ class PumpWidget(QGroupBox):
 
         layout.addLayout(ctrl)
 
+        info_row = QHBoxLayout()
+        info_row.setSpacing(10)
         self.status_label = QLabel("状态: --")
         self.status_label.setStyleSheet(_STATUS_STYLE)
-        layout.addWidget(self.status_label)
-
+        info_row.addWidget(self.status_label)
         self.position_label = QLabel("位置: -- um")
         self.position_label.setStyleSheet(_STATUS_STYLE)
-        layout.addWidget(self.position_label)
+        info_row.addWidget(self.position_label)
+        layout.addLayout(info_row)
 
         return page
 
@@ -433,12 +487,12 @@ class PumpWidget(QGroupBox):
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(4)
-        grid.setVerticalSpacing(4)
+        grid.setVerticalSpacing(2)
 
         # Syringe selector
-        lbl1 = QLabel("注射器:")
-        lbl1.setStyleSheet(_LABEL_STYLE)
-        grid.addWidget(lbl1, 0, 0)
+        lbl0 = QLabel("注射器:")
+        lbl0.setStyleSheet(_LABEL_STYLE)
+        grid.addWidget(lbl0, 0, 0)
         self.syringe_combo = QComboBox()
         self.syringe_combo.setStyleSheet(_COMBO_STYLE)
         for model in _SYRINGE_DB:
@@ -447,36 +501,47 @@ class PumpWidget(QGroupBox):
             self.syringe_combo.setCurrentIndex(0)
         grid.addWidget(self.syringe_combo, 0, 1)
         self.syringe_info = QLabel("")
-        self.syringe_info.setStyleSheet(_LABEL_STYLE)
-        grid.addWidget(self.syringe_info, 0, 2)
+        self.syringe_info.setStyleSheet("font-size: 11px; color: #aaa;")
+        grid.addWidget(self.syringe_info, 1, 0, 1, 2)
         self.syringe_combo.currentTextChanged.connect(self._on_syringe_changed)
 
-        # Volume input (mL)
-        lbl2 = QLabel("注射量 (mL):")
+        # Density input (g/mL)
+        lbl1 = QLabel("密度 (g/mL):")
+        lbl1.setStyleSheet(_LABEL_STYLE)
+        grid.addWidget(lbl1, 2, 0)
+        self.run_density_input = TouchLineEdit("1.0")
+        self.run_density_input.setStyleSheet(_INPUT_STYLE)
+        grid.addWidget(self.run_density_input, 2, 1)
+        self._density_info = QLabel("")
+        self._density_info.setStyleSheet("font-size: 11px; color: #aaa;")
+        grid.addWidget(self._density_info, 3, 0, 1, 2)
+        self.run_density_input.textChanged.connect(self._update_run_conversion)
+
+        # Mass input (g)
+        lbl2 = QLabel("注射量 (g):")
         lbl2.setStyleSheet(_LABEL_STYLE)
-        grid.addWidget(lbl2, 1, 0)
-        self.run_volume_input = TouchLineEdit("1.0")
+        grid.addWidget(lbl2, 4, 0)
+        self.run_volume_input = TouchLineEdit("0.1")
         self.run_volume_input.setStyleSheet(_INPUT_STYLE)
-        grid.addWidget(self.run_volume_input, 1, 1)
-        self._vol_um_label = QLabel("")
-        self._vol_um_label.setStyleSheet(_LABEL_STYLE)
-        grid.addWidget(self._vol_um_label, 1, 2)
+        grid.addWidget(self.run_volume_input, 4, 1)
+        self._vol_conv_label = QLabel("")
+        self._vol_conv_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        grid.addWidget(self._vol_conv_label, 5, 0, 1, 2)
 
-        # Speed input (mL/min)
-        lbl3 = QLabel("速度 (mL/min):")
+        # Speed input (g/min)
+        lbl3 = QLabel("速度 (g/min):")
         lbl3.setStyleSheet(_LABEL_STYLE)
-        grid.addWidget(lbl3, 2, 0)
-        self.run_speed_input = TouchLineEdit("1.0")
+        grid.addWidget(lbl3, 6, 0)
+        self.run_speed_input = TouchLineEdit("1")
         self.run_speed_input.setStyleSheet(_INPUT_STYLE)
-        grid.addWidget(self.run_speed_input, 2, 1)
-        self._spd_ums_label = QLabel("")
-        self._spd_ums_label.setStyleSheet(_LABEL_STYLE)
-        grid.addWidget(self._spd_ums_label, 2, 2)
+        grid.addWidget(self.run_speed_input, 6, 1)
+        self._spd_conv_label = QLabel("")
+        self._spd_conv_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        grid.addWidget(self._spd_conv_label, 7, 0, 1, 2)
 
-        # Column 0 (labels) tight, column 1 (inputs) stretchy, column 2 (info) auto
+        # Column 0 (labels) tight, column 1 (inputs) stretchy
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 0)
 
         layout.addLayout(grid)
 
@@ -503,18 +568,21 @@ class PumpWidget(QGroupBox):
         btn_row.addWidget(self.btn_run_stop)
         layout.addLayout(btn_row)
 
+        run_info_row = QHBoxLayout()
+        run_info_row.setSpacing(10)
         self.run_status_label = QLabel("状态: --")
         self.run_status_label.setStyleSheet(_STATUS_STYLE)
-        layout.addWidget(self.run_status_label)
-
+        run_info_row.addWidget(self.run_status_label)
         self.run_position_label = QLabel("位置: -- um")
         self.run_position_label.setStyleSheet(_STATUS_STYLE)
-        layout.addWidget(self.run_position_label)
+        run_info_row.addWidget(self.run_position_label)
+        layout.addLayout(run_info_row)
+
 
         self.run_progress_bar = QProgressBar()
         self.run_progress_bar.setRange(0, 100)
         self.run_progress_bar.setValue(0)
-        self.run_progress_bar.setFormat("已注射 0 mL")
+        self.run_progress_bar.setFormat("已注射 0 g")
         self.run_progress_bar.setStyleSheet(_PROGRESS_STYLE)
         self.run_progress_bar.setVisible(False)
         layout.addWidget(self.run_progress_bar)
@@ -634,7 +702,7 @@ class PumpWidget(QGroupBox):
             length_um = info
             volume_ml = 1
         if volume_ml > 0:
-            self.syringe_info.setText(f"满刻度:{length_um/1000:.1f}mm")
+            self.syringe_info.setText(f"满刻度:{volume_ml}mL/{length_um/1000:.1f}mm")
         else:
             self.syringe_info.setText("")
         self._update_run_conversion()
@@ -651,18 +719,34 @@ class PumpWidget(QGroupBox):
 
         um_per_mL = length_um / volume_ml if volume_ml > 0 else 0
 
+        # Density (g/mL)
         try:
-            vol_ml = float(self.run_volume_input.text())
-            self._vol_um_label.setText(f"{vol_ml * um_per_mL:.1f}um")
+            density = float(self.run_density_input.text())
         except ValueError:
-            self._vol_um_label.setText("")
+            density = 0
+        if density > 0:
+            um_per_g = um_per_mL / density
+            self._density_info.setText(f"1g={um_per_g:.1f}um")
+        else:
+            self._density_info.setText("")
 
+        # g → mL → um
         try:
-            spd_ml_min = float(self.run_speed_input.text())
-            spd_um_s = spd_ml_min * um_per_mL / 60.0
-            self._spd_ums_label.setText(f"{spd_um_s:.2f}um/s")
+            vol_g = float(self.run_volume_input.text())
+            vol_ml = vol_g / density if density > 0 else 0
+            vol_um = vol_ml * um_per_mL
+            self._vol_conv_label.setText(f"{vol_ml:.4f}mL={vol_um:.1f}um")
         except ValueError:
-            self._spd_ums_label.setText("")
+            self._vol_conv_label.setText("")
+
+        # g/min → mL/min → um/s
+        try:
+            spd_g_min = float(self.run_speed_input.text())
+            spd_ml_min = spd_g_min / density if density > 0 else 0
+            spd_um_s = spd_ml_min * um_per_mL / 60.0
+            self._spd_conv_label.setText(f"{spd_ml_min:.4f}mL/min={spd_um_s:.2f}um/s")
+        except ValueError:
+            self._spd_conv_label.setText("")
 
     # ── Run mode commands ──
 
@@ -677,28 +761,40 @@ class PumpWidget(QGroupBox):
         length_um = info["length_um"]
         um_per_mL = length_um / volume_ml  # µm per mL
 
-        # Read injection volume (mL)
+        # Read density (g/mL)
         try:
-            inject_ml = float(self.run_volume_input.text())
+            density = float(self.run_density_input.text())
+        except ValueError:
+            self.feedback.emit(f"泵{self.pump.addr}: 密度值无效")
+            return
+        if density <= 0:
+            self.feedback.emit(f"泵{self.pump.addr}: 密度必须大于0")
+            return
+
+        # Read injection mass (g)
+        try:
+            inject_g = float(self.run_volume_input.text())
         except ValueError:
             self.feedback.emit(f"泵{self.pump.addr}: 注射量无效")
             return
-        if inject_ml <= 0:
-            self.feedback.emit(f"泵{self.pump.addr}: 注射量必须大于0")
+        if inject_g < 0.001:
+            self.feedback.emit(f"泵{self.pump.addr}: 注射量最小0.001g")
             return
 
-        # Read speed (mL/min)
+        # Read speed (g/min)
         try:
-            speed_ml_min = float(self.run_speed_input.text())
+            speed_g_min = float(self.run_speed_input.text())
         except ValueError:
             self.feedback.emit(f"泵{self.pump.addr}: 速度值无效")
             return
-        if speed_ml_min <= 0:
+        if speed_g_min <= 0:
             self.feedback.emit(f"泵{self.pump.addr}: 速度必须大于0")
             return
 
-        # Convert to µm
+        # g → mL → µm
+        inject_ml = inject_g * 1000 / density
         inject_um = inject_ml * um_per_mL
+        speed_ml_min = speed_g_min * 1000 / density
         speed_um_s = speed_ml_min * um_per_mL / 60.0  # mL/min → µm/s
 
         # Set speed → set increment → start
@@ -712,24 +808,25 @@ class PumpWidget(QGroupBox):
             return
 
         self._run_total_um = inject_um
-        self._run_total_ml = inject_ml
+        self._run_total_g = inject_g
         self._run_speed_um_s = speed_um_s
         self._run_start_pos = self._current_pos
         self.run_progress_bar.setValue(0)
-        self.run_progress_bar.setFormat("已注射 0 mL")
+        self.run_progress_bar.setFormat("已注射 0 g")
         self.run_remain_label.setText("剩余: 计算中...")
 
         ok = self.pump.start()
         self.feedback.emit(
-            f"泵{self.pump.addr}: {model} 注射{inject_ml}mL "
-            f"@{speed_ml_min}mL/min ({inject_um/1000:.1f}mm) {'成功' if ok else '失败'}"
+            f"泵{self.pump.addr}: {model} 注射{inject_g}g "
+            f"@{speed_g_min}g/min ({inject_um/1000:.1f}mm) {'成功' if ok else '失败'}"
         )
 
     def _run_stop(self):
         ok = self.pump.stop()
         self._run_total_um = 0
+        self._run_total_g = 0
         self.run_progress_bar.setValue(0)
-        self.run_progress_bar.setFormat("已注射 0 mL")
+        self.run_progress_bar.setFormat("已注射 0 g")
         self.run_remain_label.setText("")
         self.feedback.emit(f"泵{self.pump.addr}: 停止 {'成功' if ok else '失败'}")
 
@@ -749,7 +846,7 @@ class PumpWidget(QGroupBox):
             for label in (self.position_label, self.run_position_label):
                 label.setText("位置: -- um")
             self.run_progress_bar.setValue(0)
-            self.run_progress_bar.setFormat("已注射 0 mL")
+            self.run_progress_bar.setFormat("已注射 0 g")
             self.run_remain_label.setText("")
             for btn in (self.btn_pause_resume, self.btn_run_pause_resume):
                 btn.setText("暂停")
@@ -837,9 +934,9 @@ class PumpWidget(QGroupBox):
         if self._run_mode and self._run_total_um > 0:
             traveled = abs(position - self._run_start_pos)
             pct = min(100, int(traveled / self._run_total_um * 100))
-            injected_ml = pct / 100 * self._run_total_ml
+            injected_g = pct / 100 * self._run_total_g
             self.run_progress_bar.setValue(pct)
-            self.run_progress_bar.setFormat(f"已注射 {injected_ml:.2f} mL")
+            self.run_progress_bar.setFormat(f"已注射 {injected_g:.4f} g")
 
             # Remaining time estimate
             if self._current_status == 1:  # running
