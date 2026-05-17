@@ -6,7 +6,7 @@ import serial.tools.list_ports
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QLabel, QComboBox, QPushButton, QCheckBox, QStatusBar, QGroupBox,
-    QMessageBox, QScrollArea, QTextEdit, QDialog, QApplication,
+    QMessageBox, QScrollArea, QTextEdit, QTextBrowser, QDialog, QApplication,
 )
 from PyQt5.QtCore import Qt, QEvent, QTimer
 from PyQt5.QtGui import QFont
@@ -219,6 +219,16 @@ class MainWindow(QMainWindow):
         )
         btn_load.clicked.connect(self._load_preset)
         row1.addWidget(btn_load)
+
+        btn_help = QPushButton("说明书")
+        btn_help.setStyleSheet(
+            "QPushButton { background: #555; font-weight: bold; color: white;"
+            "font-size: 14px; min-height: 34px; min-width: 56px;"
+            "border-radius: 5px; border: 1px solid #555; }"
+            "QPushButton:pressed { background: #5294e2; }"
+        )
+        btn_help.clicked.connect(self._show_help)
+        row1.addWidget(btn_help)
 
         self.btn_maximize = QPushButton("最大化")
         self.btn_maximize.setStyleSheet(
@@ -596,6 +606,97 @@ class MainWindow(QMainWindow):
             self._drag_pos = None
             return True
         return super().eventFilter(obj, event)
+
+    def _show_help(self):
+        text = """<div style="font-size:15px; line-height:1.6;">
+<h2>注射泵 RS485 控制系统 — 使用说明</h2>
+
+<h3>一、连接设备</h3>
+<ol>
+<li>选择串口号和波特率（默认 9600）</li>
+<li>点击"连接"按钮建立 RS485 通信</li>
+<li>连接成功后状态栏显示"已连接"</li>
+</ol>
+
+<h3>二、启用设备</h3>
+<ol>
+<li>勾选泵的"启用"复选框以激活该设备</li>
+<li>启用后设备开始轮询状态和位置</li>
+<li>未启用的设备按钮禁用，不收发数据</li>
+</ol>
+
+<h3>三、调试模式</h3>
+<ul>
+<li><b>速度</b>：设置电机运行速度（um/s）</li>
+<li><b>加速度</b>：设置加减速等级（1-100）</li>
+<li><b>增量位移</b>：设置相对移动距离（um），正数前进，负数后退</li>
+<li><b>绝对位置</b>：移动到指定绝对位置（um）</li>
+<li><b>设为零点</b>：将当前位置设为零点</li>
+<li><b>开始/暂停/继续/停止</b>：控制电机运行</li>
+</ul>
+
+<h3>四、运行模式</h3>
+<ul>
+<li>点击"调试"按钮切换到"运行"模式</li>
+<li><b>注射器</b>：选择注射器型号（1mL/2.5mL/10mL/20mL）</li>
+<li><b>注入量</b>：设置注入体积（mL），负数为抽取模式</li>
+<li><b>速度</b>：设置注入速度（mL/min）</li>
+<li>系统自动将 mL 换算为 um 下发给设备</li>
+<li>运行中显示进度和剩余时间</li>
+</ul>
+
+<h3>五、批量操作</h3>
+<ul>
+<li><b>一键开始</b>：启动所有已启用泵的当前模式</li>
+<li><b>一键停止</b>：停止所有已启用泵</li>
+<li><b>一键暂停/继续</b>：暂停或继续所有已启用泵</li>
+</ul>
+
+<h3>六、预设功能</h3>
+<ul>
+<li>选择预设编号（1-3），点击"保存"保存当前所有泵参数</li>
+<li>点击"加载"恢复之前保存的参数</li>
+<li>预设保存在 presets.json 文件中</li>
+</ul>
+
+<h3>七、串口日志</h3>
+<ul>
+<li>点击"串口日志"打开日志窗口</li>
+<li>实时显示所有 Modbus RTU 收发数据</li>
+<li>蓝色=发送(TX)，绿色=接收(RX)，红色=错误(ERR)，橙色=系统(SYS)</li>
+</ul>
+
+<h3>八、通信协议</h3>
+<ul>
+<li>Modbus RTU over RS485</li>
+<li>设备地址：0x01 - 0x0F（1-15）</li>
+<li>功能码：0x03（读保持寄存器），0x06（写单寄存器），0x10（写多寄存器）</li>
+<li>单位换算：1mm = 6400步，1um = 6.4步</li>
+</ul>
+</div>
+"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("说明书")
+        dlg.setMinimumSize(600, 500)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        browser.setHtml(text)
+        layout.addWidget(browser)
+
+        btn_close = QPushButton("关闭")
+        btn_close.setStyleSheet(
+            "QPushButton { font-size: 14px; min-height: 34px; min-width: 60px;"
+            "border-radius: 5px; border: 1px solid #555;"
+            "background: #3c3f41; color: white; }"
+            "QPushButton:pressed { background: #5294e2; }"
+        )
+        btn_close.clicked.connect(dlg.accept)
+        layout.addWidget(btn_close, alignment=Qt.AlignCenter)
+
+        dlg.exec_()
 
     def _quit_app(self):
         self._stop_polling()
