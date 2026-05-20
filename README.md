@@ -56,3 +56,5 @@ python main.py
 ├── data.csv             # 注射器型号数据
 └── requirements.txt     # Python 依赖
 ```
+
+![alt text](doc/img/1.png)
