@@ -334,6 +334,19 @@ class PumpWidget(QGroupBox):
 
         layout.addWidget(self.stack)
 
+        self.run_progress_bar = QProgressBar()
+        self.run_progress_bar.setRange(0, 100)
+        self.run_progress_bar.setValue(0)
+        self.run_progress_bar.setFormat("已注射 0 mL")
+        self.run_progress_bar.setStyleSheet(_PROGRESS_STYLE)
+        self.run_progress_bar.setVisible(False)
+        layout.addWidget(self.run_progress_bar)
+
+        self.run_remain_label = QLabel("")
+        self.run_remain_label.setStyleSheet(_STATUS_STYLE)
+        self.run_remain_label.setVisible(False)
+        layout.addWidget(self.run_remain_label)
+
         layout.addStretch()
 
     # ── Preset save/load ──
@@ -558,19 +571,6 @@ class PumpWidget(QGroupBox):
         layout.addLayout(run_info_row)
 
 
-        self.run_progress_bar = QProgressBar()
-        self.run_progress_bar.setRange(0, 100)
-        self.run_progress_bar.setValue(0)
-        self.run_progress_bar.setFormat("已注入 0 mL")
-        self.run_progress_bar.setStyleSheet(_PROGRESS_STYLE)
-        self.run_progress_bar.setVisible(False)
-        layout.addWidget(self.run_progress_bar)
-
-        self.run_remain_label = QLabel("")
-        self.run_remain_label.setStyleSheet(_STATUS_STYLE)
-        self.run_remain_label.setVisible(False)
-        layout.addWidget(self.run_remain_label)
-
         # Trigger initial calculation
         self._on_syringe_changed(self.syringe_combo.currentText())
 
@@ -636,6 +636,17 @@ class PumpWidget(QGroupBox):
             self.feedback.emit(f"泵{addr}: 设置位移失败")
             return
 
+        self._run_total_um = abs(incr_val)
+        self._run_total_ml = 0
+        self._run_is_aspirate = incr_val < 0
+        self._run_speed_um_s = abs(speed_val)
+        self._run_start_pos = self._current_pos
+        self.run_progress_bar.setVisible(True)
+        self.run_remain_label.setVisible(True)
+        self.run_progress_bar.setValue(0)
+        action = "抽取" if self._run_is_aspirate else "注入"
+        self.run_progress_bar.setFormat(f"{action} 0 / {incr_val:.0f} um")
+
         ok = self.pump.start()
         self.feedback.emit(
             f"泵{addr}: 速度{speed_val}um/s 加速度{accel_val} "
@@ -652,6 +663,9 @@ class PumpWidget(QGroupBox):
 
     def _stop(self):
         ok = self.pump.stop()
+        self._run_total_um = 0
+        self.run_progress_bar.setValue(0)
+        self.run_remain_label.setText("")
         self.feedback.emit(f"泵{self.pump.addr}: 停止 {'成功' if ok else '失败'}")
 
     def _toggle_pause(self):
@@ -770,8 +784,8 @@ class PumpWidget(QGroupBox):
             self.feedback.emit(f"泵{self.pump.addr}: 设置位移失败")
             return
 
-        self._run_total_um = inject_um
-        self._run_total_ml = inject_ml
+        self._run_total_um = abs(inject_um)
+        self._run_total_ml = abs(inject_ml)
         self._run_speed_um_s = speed_um_s
         self._run_start_pos = self._current_pos
         self._run_is_aspirate = inject_ml < 0
@@ -898,14 +912,18 @@ class PumpWidget(QGroupBox):
         for label in (self.position_label, self.run_position_label):
             label.setText(f"位置: {position:.1f} um")
 
-        # Update run-mode progress
-        if self._run_mode and self._run_total_um > 0:
+        # Update progress
+        if self._run_total_um > 0:
             traveled = abs(position - self._run_start_pos)
             pct = min(100, int(traveled / abs(self._run_total_um) * 100))
-            injected_ml = pct / 100 * abs(self._run_total_ml)
             self.run_progress_bar.setValue(pct)
             action = "已抽取" if self._run_is_aspirate else "已注入"
-            self.run_progress_bar.setFormat(f"{action} {injected_ml:.3f} mL")
+            if self._run_total_ml > 0:
+                injected_ml = pct / 100 * abs(self._run_total_ml)
+                self.run_progress_bar.setFormat(f"{action} {injected_ml:.3f} mL")
+            else:
+                moved_um = pct / 100 * self._run_total_um
+                self.run_progress_bar.setFormat(f"{action} {moved_um:.0f} um")
 
             # Remaining time estimate
             if self._current_status == 1:  # running
